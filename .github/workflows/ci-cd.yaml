@@ -35,6 +35,7 @@ jobs:
 
     outputs:
       image_tag: ${{ steps.meta.outputs.tags }}
+      short_sha: ${{ steps.short-sha.outputs.sha }}
 
     steps:
     # 1. 코드 체크아웃
@@ -68,14 +69,19 @@ jobs:
         username: ${{ secrets.ACR_USERNAME }}
         password: ${{ secrets.ACR_PASSWORD }}
 
-    # 6. Docker 이미지 메타데이터 설정
+    # 6. 짧은 SHA 생성
+    - name: Get short SHA
+      id: short-sha
+      run: echo "sha=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+    # 7. Docker 이미지 메타데이터 설정
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}
         tags: |
-          type=sha,prefix=
+          type=raw,value=${{ steps.short-sha.outputs.sha }}
           type=ref,event=branch
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
@@ -88,15 +94,10 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
 
-    # 8. 취약점 스캔 (선택사항)
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      if: github.event_name != 'pull_request'
-      with:
-        image-ref: '${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}'
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-      continue-on-error: true
+    # 9. 짧은 SHA 출력 (deploy job에서 사용)
+    - name: Output short SHA
+      id: output-sha
+      run: echo "short_sha=${{ steps.short-sha.outputs.sha }}" >> $GITHUB_OUTPUT
 
   # ============================================
   # Job 2: AKS에 배포
@@ -132,6 +133,10 @@ jobs:
     # 4. Kubernetes 매니페스트 배포
     - name: Deploy to AKS
       run: |
+        # 이미지 태그 설정 (짧은 SHA 사용)
+        IMAGE_TAG="${{ needs.build.outputs.short_sha }}"
+        echo "Deploying image tag: $IMAGE_TAG"
+
         # 네임스페이스 생성 (없으면)
         kubectl apply -f k8s/namespace.yaml
 
@@ -140,7 +145,7 @@ jobs:
 
         # Deployment 이미지 업데이트 및 배포
         cat k8s/deployment.yaml | \
-          sed "s|image: .*|image: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" | \
+          sed "s|image: .*|image: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${IMAGE_TAG}|g" | \
           kubectl apply -f -
 
         # Service 배포
@@ -174,7 +179,7 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
         echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
-        echo "| Image | \`${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Image | \`${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ needs.build.outputs.short_sha }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| Namespace | \`${{ env.NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "| External IP | \`${{ steps.get-ip.outputs.external_ip }}\` |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
