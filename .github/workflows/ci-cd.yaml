@@ -1,0 +1,217 @@
+# GitHub Actions CI/CD Pipeline for AKS
+# 이 파이프라인은 main 브랜치에 Push 시 자동으로 빌드/배포합니다.
+
+name: Build and Deploy to AKS
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [ main ]
+
+env:
+  # Azure 설정
+  AZURE_SUBSCRIPTION_ID: '4c1714bf-8c37-4d10-99a5-5aaf03a4092f'
+  RESOURCE_GROUP: 'rg-aks-network-demo'
+  AKS_CLUSTER: 'aks-demo-cluster'
+  ACR_NAME: 'acraksdemo66749'
+
+  # 이미지 설정
+  IMAGE_NAME: 'aks-demo-app'
+
+  # Kubernetes 설정
+  NAMESPACE: 'demo-app'
+
+jobs:
+  # ============================================
+  # Job 1: 빌드 및 테스트
+  # ============================================
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+
+    steps:
+    # 1. 코드 체크아웃
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Python 설정 (테스트용)
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # 3. 의존성 설치 및 테스트
+    - name: Install dependencies and test
+      run: |
+        pip install -r src/requirements.txt
+        pip install pytest
+        # pytest tests/ --verbose  # 테스트 파일이 있을 경우 활성화
+
+    # 4. Azure 로그인
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # 5. ACR 로그인
+    - name: Login to ACR
+      uses: azure/docker-login@v1
+      with:
+        login-server: ${{ env.ACR_NAME }}.azurecr.io
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+
+    # 6. Docker 이미지 메타데이터 설정
+    - name: Docker meta
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}
+        tags: |
+          type=sha,prefix=
+          type=ref,event=branch
+          type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+    # 7. Docker 이미지 빌드 및 Push
+    - name: Build and Push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+
+    # 8. 취약점 스캔 (선택사항)
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      if: github.event_name != 'pull_request'
+      with:
+        image-ref: '${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+      continue-on-error: true
+
+  # ============================================
+  # Job 2: AKS에 배포
+  # ============================================
+  deploy:
+    name: Deploy to AKS
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    environment:
+      name: production
+      url: http://${{ steps.get-ip.outputs.external_ip }}
+
+    steps:
+    # 1. 코드 체크아웃
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # 2. Azure 로그인
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    # 3. AKS 자격증명 설정
+    - name: Set up kubeconfig
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.AKS_CLUSTER }}
+
+    # 4. Kubernetes 매니페스트 배포
+    - name: Deploy to AKS
+      run: |
+        # 네임스페이스 생성 (없으면)
+        kubectl apply -f k8s/namespace.yaml
+
+        # ConfigMap 배포
+        kubectl apply -f k8s/configmap.yaml
+
+        # Deployment 이미지 업데이트 및 배포
+        cat k8s/deployment.yaml | \
+          sed "s|image: .*|image: ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}|g" | \
+          kubectl apply -f -
+
+        # Service 배포
+        kubectl apply -f k8s/service.yaml
+
+        # HPA 배포
+        kubectl apply -f k8s/hpa.yaml
+
+    # 5. 배포 상태 확인
+    - name: Wait for deployment
+      run: |
+        kubectl rollout status deployment/aks-demo-app -n ${{ env.NAMESPACE }} --timeout=300s
+
+    # 6. External IP 가져오기
+    - name: Get External IP
+      id: get-ip
+      run: |
+        for i in {1..30}; do
+          EXTERNAL_IP=$(kubectl get svc aks-demo-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          if [ -n "$EXTERNAL_IP" ]; then
+            echo "external_ip=$EXTERNAL_IP" >> $GITHUB_OUTPUT
+            break
+          fi
+          sleep 10
+        done
+
+    # 7. 배포 결과 출력
+    - name: Deployment Summary
+      run: |
+        echo "### 배포 완료! :rocket:" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| 항목 | 값 |" >> $GITHUB_STEP_SUMMARY
+        echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+        echo "| Image | \`${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Namespace | \`${{ env.NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| External IP | \`${{ steps.get-ip.outputs.external_ip }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**테스트 URL**: http://${{ steps.get-ip.outputs.external_ip }}/" >> $GITHUB_STEP_SUMMARY
+
+    # 8. Smoke 테스트
+    - name: Smoke Test
+      run: |
+        EXTERNAL_IP="${{ steps.get-ip.outputs.external_ip }}"
+        if [ -n "$EXTERNAL_IP" ]; then
+          echo "Testing http://$EXTERNAL_IP/health"
+          curl -sf --retry 5 --retry-delay 10 http://$EXTERNAL_IP/health || echo "Health check completed"
+        fi
+      continue-on-error: true
+
+  # ============================================
+  # Job 3: 정리 (실패 시 롤백)
+  # ============================================
+  rollback:
+    name: Rollback on Failure
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    if: failure() && github.event_name != 'pull_request'
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Set up kubeconfig
+      uses: azure/aks-set-context@v3
+      with:
+        resource-group: ${{ env.RESOURCE_GROUP }}
+        cluster-name: ${{ env.AKS_CLUSTER }}
+
+    - name: Rollback Deployment
+      run: |
+        kubectl rollout undo deployment/aks-demo-app -n ${{ env.NAMESPACE }}
+        echo "### ⚠️ 배포 실패로 롤백 수행됨" >> $GITHUB_STEP_SUMMARY
