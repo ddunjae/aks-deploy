@@ -6,7 +6,7 @@ metadata:
   labels:
     app: aks-demo
 spec:
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
       app: aks-demo
@@ -19,11 +19,11 @@ spec:
     metadata:
       labels:
         app: aks-demo
-        version: v1
+        version: v2
     spec:
       containers:
       - name: aks-demo-app
-        image: acraksdemo66749.azurecr.io/aks-demo-app:v1
+        image: acraksdemo66749.azurecr.io/aks-demo-app:v3
         ports:
         - containerPort: 8080
           name: http
@@ -39,7 +39,7 @@ spec:
             memory: "128Mi"
             cpu: "100m"
           limits:
-            memory: "256Mi"
+            memory: "512Mi"
             cpu: "500m"
 
         # Liveness Probe - 컨테이너가 살아있는지 확인
@@ -47,7 +47,7 @@ spec:
           httpGet:
             path: /health
             port: 8080
-          initialDelaySeconds: 10
+          initialDelaySeconds: 15
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
@@ -57,7 +57,7 @@ spec:
           httpGet:
             path: /ready
             port: 8080
-          initialDelaySeconds: 5
+          initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 3

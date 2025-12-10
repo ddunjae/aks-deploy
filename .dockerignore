@@ -2,7 +2,13 @@
 .git
 .gitignore
 
-# Python
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (legacy)
 __pycache__
 *.py[cod]
 *$py.class
@@ -35,8 +41,13 @@ docs/
 tests/
 .pytest_cache/
 .coverage
+coverage/
+
+# Build outputs
+frontend/build/
 
 # Misc
 .env
 .env.*
 *.log
+.DS_Store

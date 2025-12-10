@@ -1,30 +1,44 @@
-# Multi-stage build for optimized image size
-# Stage 1: Build stage
-FROM python:3.11-slim as builder
+# Multi-stage build for React + Node.js application
+# Stage 1: Build React frontend
+FROM node:20-alpine AS frontend-builder
 
-WORKDIR /app
+WORKDIR /app/frontend
+
+# Copy frontend package files
+COPY frontend/package*.json ./
 
 # Install dependencies
-COPY src/requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN npm install
 
-# Stage 2: Production stage
-FROM python:3.11-slim
+# Copy frontend source
+COPY frontend/ ./
+
+# Build React app
+RUN npm run build
+
+# Stage 2: Production Node.js server
+FROM node:20-alpine
 
 # Security: Run as non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S appuser -u 1001 -G appgroup
 
 WORKDIR /app
 
-# Copy installed packages from builder
-COPY --from=builder /root/.local /home/appuser/.local
+# Copy backend package files
+COPY backend/package*.json ./
 
-# Copy application code and set proper ownership
-COPY --chown=appuser:appuser src/app.py .
+# Install production dependencies only
+RUN npm install --omit=dev
+
+# Copy backend source
+COPY --chown=appuser:appgroup backend/server.js ./
+
+# Copy built React app to public folder
+COPY --from=frontend-builder --chown=appuser:appgroup /app/frontend/build ./public
 
 # Set environment variables
-ENV PATH=/home/appuser/.local/bin:$PATH
-ENV PYTHONUNBUFFERED=1
+ENV NODE_ENV=production
 ENV PORT=8080
 
 # Switch to non-root user
@@ -35,7 +49,7 @@ EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
-# Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "app:app"]
+# Start the server
+CMD ["node", "server.js"]
