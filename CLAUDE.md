@@ -8,7 +8,7 @@
 
 | 항목 | 내용 |
 |------|------|
-| **작업일** | 2025-12-09 |
+| **작업일** | 2025-12-09 ~ 2025-12-10 |
 | **목적** | Azure AKS 환경에서 Hub-Spoke 네트워크 아키텍처 구성 및 CI/CD 파이프라인 구현 |
 | **Azure 구독** | Visual Studio Enterprise 구독 - MPN (4c1714bf-8c37-4d10-99a5-5aaf03a4092f) |
 | **테넌트** | 299692cc-a833-4659-b8d4-3a7cdf6a66c2 |
@@ -339,8 +339,170 @@ az ad sp delete --id e03db869-fe43-4a23-8b3c-3edf9fc336ee
 
 ---
 
+## Phase 10: Jump Box VM 구성 및 AKS 노드 접속 (2025-12-10)
+
+### 10.1 Azure 구성도 생성
+
+**요청:** 두 리소스 그룹(`rg-aks-network-demo`, `MC_rg-aks-network-demo_aks-demo-cluster_koreacentral`) 기준 Azure 구성도 생성
+
+**수행 내용:**
+- 리소스 그룹의 모든 리소스 조회
+- VNet, 서브넷, 피어링 정보 수집
+- AKS 클러스터 네트워크 구성 확인
+- ASCII art 기반 아키텍처 구성도 작성
+
+### 10.2 Jump Box VM 생성
+
+**요청:** AKS 노드 접속을 위한 Jump Box VM 생성
+
+**수행 명령어:**
+```bash
+az vm create \
+  --resource-group rg-aks-network-demo \
+  --name vm-jumpbox \
+  --image Ubuntu2204 \
+  --vnet-name vnet-hub \
+  --subnet snet-management \
+  --size Standard_B2s \
+  --admin-username conortest \
+  --admin-password 'qwert12345!!' \
+  --authentication-type password \
+  --public-ip-address pip-jumpbox \
+  --nsg nsg-jumpbox \
+  --location koreacentral
+```
+
+**생성된 리소스:**
+| 항목 | 값 |
+|------|-----|
+| VM 이름 | `vm-jumpbox` |
+| Public IP | `4.217.191.222` |
+| Private IP | `10.0.4.4` |
+| 서브넷 | `snet-management (10.0.4.0/24)` |
+| OS | Ubuntu 22.04.5 LTS |
+| Size | Standard_B2s |
+
+### 10.3 VM에 Azure CLI 및 kubectl 설치
+
+**수행 명령어 (VM 내부에서):**
+```bash
+# Azure CLI 설치
+curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# kubectl 및 kubelogin 설치
+az aks install-cli
+```
+
+### 10.4 VM Managed Identity에 AKS 역할 할당
+
+```bash
+# AKS Cluster User Role 할당
+az role assignment create \
+  --assignee <VM_PRINCIPAL_ID> \
+  --role "Azure Kubernetes Service Cluster User Role" \
+  --scope <AKS_ID>
+
+# AKS Cluster Admin Role 할당
+az role assignment create \
+  --assignee <VM_PRINCIPAL_ID> \
+  --role "Azure Kubernetes Service Cluster Admin Role" \
+  --scope <AKS_ID>
+```
+
+### 10.5 NSG 규칙 추가 (HTTP 허용)
+
+**문제 발견:** LoadBalancer External IP로 접속 시 Connection Timeout 발생
+
+**원인 분석:**
+- `nsg-aks-nodes` NSG에 HTTP(80) 인바운드 허용 규칙이 없음
+- 기본 규칙 `DenyAllInBound`가 인터넷 트래픽 차단
+
+**해결:**
+```bash
+az network nsg rule create \
+  --resource-group rg-aks-network-demo \
+  --nsg-name nsg-aks-nodes \
+  --name Allow-HTTP-Inbound \
+  --priority 100 \
+  --direction Inbound \
+  --access Allow \
+  --protocol Tcp \
+  --source-address-prefixes Internet \
+  --source-port-ranges '*' \
+  --destination-address-prefixes '*' \
+  --destination-port-ranges 80
+```
+
+**결과:**
+```bash
+curl http://4.230.74.213
+# {"environment":"production","message":"Welcome to AKS Demo Application!","version":"1.0.0"}
+```
+
+### 10.6 AKS 노드 접속 테스트
+
+**kubectl debug를 통한 노드 접속:**
+```bash
+kubectl debug node/aks-systempool-64021530-vmss000001 -it --image=mcr.microsoft.com/cbl-mariner/busybox:2.0
+```
+
+**노드 정보:**
+| 항목 | 값 |
+|------|-----|
+| 노드 이름 | `aks-systempool-64021530-vmss000001` |
+| Internal IP | `10.1.1.4` |
+| OS | Ubuntu 22.04.5 LTS |
+| Kubernetes | v1.32.9 |
+| Container Runtime | containerd://1.7.29-1 |
+
+---
+
+## 발생한 이슈 및 해결 (추가)
+
+### Issue 4: LoadBalancer IP 접속 불가
+- **증상:** External IP `4.230.74.213`로 curl 시 Connection Timeout
+- **원인:** `nsg-aks-nodes` NSG에 HTTP(80) 인바운드 규칙 없음
+- **해결:** `Allow-HTTP-Inbound` 규칙 추가 (Priority 100)
+
+### Issue 5: VM에서 kubectl 인증 실패
+- **증상:** `localhost:8080 connection refused` 오류
+- **원인:** kubelogin으로 kubeconfig 변환 필요
+- **해결:** `kubelogin convert-kubeconfig -l msi` 실행
+
+---
+
+## 현재 인프라 상태 요약
+
+### 네트워크 구성
+```
+Hub VNet (10.0.0.0/16)
+├── AzureFirewallSubnet (10.0.1.0/24) - 예약됨
+├── GatewaySubnet (10.0.2.0/24) - 예약됨
+├── AzureBastionSubnet (10.0.3.0/26) - 예약됨
+└── snet-management (10.0.4.0/24) - vm-jumpbox 배포됨
+         │
+         │ VNet Peering (Connected)
+         ▼
+Spoke VNet (10.1.0.0/16)
+├── snet-aks-system (10.1.1.0/24) - AKS 시스템 노드
+├── snet-aks-user (10.1.2.0/23) - AKS 사용자 노드
+├── snet-aks-ilb (10.1.4.0/24) - Internal LB
+├── snet-appgw (10.1.5.0/24) - App Gateway
+└── snet-privateendpoint (10.1.10.0/24) - Private Endpoint
+```
+
+### 주요 접속 정보
+| 서비스 | 접속 주소 |
+|--------|----------|
+| 데모 앱 | http://4.230.74.213 |
+| Jump Box SSH | ssh conortest@4.217.191.222 |
+| AKS API | aks-demo-c-rg-aks-network-d-4c1714-wcmvde2f.hcp.koreacentral.azmk8s.io |
+
+---
+
 ## 참고 문서
 
 - [Azure AKS 네트워킹 개념](https://docs.microsoft.com/azure/aks/concepts-network)
 - [Hub-Spoke 토폴로지](https://docs.microsoft.com/azure/architecture/reference-architectures/hybrid-networking/hub-spoke)
 - [GitHub Actions for Azure](https://docs.microsoft.com/azure/developer/github/github-actions)
+- [AKS 노드 접속 방법](https://docs.microsoft.com/azure/aks/node-access)

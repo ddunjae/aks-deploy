@@ -186,9 +186,11 @@ Azure Kubernetes Service(AKS)를 활용한 Hub-Spoke 네트워크 아키텍처 �
 | VNet Peering | `peer-spoke-aks-to-hub` | Spoke→Hub 연결 |
 | NSG | `nsg-aks-nodes` | AKS 노드 보안 그룹 |
 | NSG | `nsg-appgw` | App Gateway 보안 그룹 |
+| NSG | `nsg-jumpbox` | Jump Box VM 보안 그룹 |
 | Route Table | `rt-aks-spoke` | AKS 라우팅 테이블 |
 | AKS Cluster | `aks-demo-cluster` | Kubernetes 클러스터 |
 | Container Registry | `acraksdemo66749` | 컨테이너 이미지 저장소 |
+| Virtual Machine | `vm-jumpbox` | Jump Box VM (AKS 노드 접속용) |
 
 ### 3.2 배포된 애플리케이션
 
@@ -420,6 +422,53 @@ kubectl exec -it <pod-name> -n demo-app -- /bin/sh
 kubectl get endpoints -n demo-app
 ```
 
+### 7.4 AKS 노드 접속 방법
+
+AKS 노드(VM)에 직접 접속해야 하는 경우 다음 방법들을 사용할 수 있습니다.
+
+#### 방법 1: kubectl debug (권장)
+```bash
+# 노드 목록 확인
+kubectl get nodes
+
+# 노드에 디버그 세션 시작
+kubectl debug node/<노드이름> -it --image=mcr.microsoft.com/cbl-mariner/busybox:2.0
+
+# 노드 파일시스템 접근
+chroot /host
+```
+
+#### 방법 2: Jump Box VM 사용
+Hub VNet의 snet-management 서브넷에 생성된 Jump Box VM을 통해 접속합니다.
+
+| 항목 | 값 |
+|------|-----|
+| VM 이름 | `vm-jumpbox` |
+| Public IP | `4.217.191.222` |
+| Private IP | `10.0.4.4` |
+| Username | `conortest` |
+| 서브넷 | `snet-management (10.0.4.0/24)` |
+
+```bash
+# SSH 접속
+ssh conortest@4.217.191.222
+
+# VM 내에서 AKS 연결
+az login --identity
+az aks get-credentials -g rg-aks-network-demo -n aks-demo-cluster
+kubelogin convert-kubeconfig -l msi
+kubectl get nodes
+```
+
+#### 방법 3: az aks command invoke
+```bash
+# 클러스터에 직접 명령어 실행
+az aks command invoke \
+  --resource-group rg-aks-network-demo \
+  --name aks-demo-cluster \
+  --command "kubectl get nodes -o wide"
+```
+
 ---
 
 ## 8. 트러블슈팅
@@ -455,6 +504,32 @@ kubectl describe svc aks-demo-service -n demo-app
 
 # NSG 규칙 확인
 az network nsg rule list --nsg-name nsg-aks-nodes --resource-group rg-aks-network-demo -o table
+```
+
+### 8.4 LoadBalancer IP로 접속 불가 (Connection Timeout)
+
+**증상:** External IP가 할당되었지만 브라우저/curl로 접속 시 타임아웃
+
+**원인:** `nsg-aks-nodes` NSG에 인바운드 HTTP(80) 허용 규칙이 없음
+
+**해결:**
+```bash
+# HTTP 80 포트 인바운드 허용 규칙 추가
+az network nsg rule create \
+  --resource-group rg-aks-network-demo \
+  --nsg-name nsg-aks-nodes \
+  --name Allow-HTTP-Inbound \
+  --priority 100 \
+  --direction Inbound \
+  --access Allow \
+  --protocol Tcp \
+  --source-address-prefixes Internet \
+  --source-port-ranges '*' \
+  --destination-address-prefixes '*' \
+  --destination-port-ranges 80
+
+# 접속 테스트
+curl http://4.230.74.213
 ```
 
 ---
