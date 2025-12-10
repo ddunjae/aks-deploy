@@ -1,4 +1,4 @@
-# AKS Demo Application - 네트워크 아키텍처 및 CI/CD 실습
+# AKS Demo Application - 네트워크 아키텍처 
 
 Azure Kubernetes Service(AKS)를 활용한 Hub-Spoke 네트워크 아키텍처 구성과 GitHub Actions CI/CD 파이프라인 구현 실습 프로젝트입니다.
 
