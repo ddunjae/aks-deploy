@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "koreacentral"
+    },
+    "resourceGroupName": {
+      "value": "rg-aks-network-demo"
+    },
+    "environment": {
+      "value": "Demo"
+    },
+    "hubVnetAddressPrefix": {
+      "value": "10.0.0.0/16"
+    },
+    "spokeVnetAddressPrefix": {
+      "value": "10.1.0.0/16"
+    },
+    "aksServiceCidr": {
+      "value": "10.2.0.0/16"
+    },
+    "aksDnsServiceIp": {
+      "value": "10.2.0.10"
+    },
+    "aksClusterName": {
+      "value": "aks-demo-cluster"
+    },
+    "kubernetesVersion": {
+      "value": "1.32"
+    },
+    "aksSystemNodeVmSize": {
+      "value": "Standard_DS2_v2"
+    },
+    "acrName": {
+      "value": "acraksdemo66749"
+    },
+    "jumpboxAdminUsername": {
+      "value": "conortest"
+    },
+    "jumpboxAdminPassword": {
+      "reference": {
+        "keyVault": {
+          "id": "/subscriptions/<subscription-id>/resourceGroups/<rg-name>/providers/Microsoft.KeyVault/vaults/<vault-name>"
+        },
+        "secretName": "jumpbox-password"
+      }
+    },
+    "sshPublicKey": {
+      "value": "<your-ssh-public-key>"
+    }
+  }
+}
