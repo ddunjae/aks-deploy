@@ -1,0 +1,379 @@
+# GitHub Actions Workflow for Bicep Infrastructure Deployment
+# AKS Demo Environment 인프라 배포
+
+name: Deploy Infrastructure (Bicep)
+
+on:
+  # 수동 실행
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'demo'
+        type: choice
+        options:
+          - demo
+          - dev
+          - prod
+      action:
+        description: 'Deployment action'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - validate
+          - what-if
+      location:
+        description: 'Azure region'
+        required: true
+        default: 'koreacentral'
+        type: string
+
+  # infra/ 폴더 변경 시 자동 실행
+  push:
+    branches: [ main ]
+    paths:
+      - 'infra/**'
+      - '.github/workflows/deploy-infra.yaml'
+
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'infra/**'
+
+env:
+  # Azure 설정
+  AZURE_SUBSCRIPTION_ID: '4c1714bf-8c37-4d10-99a5-5aaf03a4092f'
+  AZURE_TENANT_ID: '299692cc-a833-4659-b8d4-3a7cdf6a66c2'
+
+  # Bicep 설정
+  BICEP_FILE: 'infra/main.bicep'
+  PARAMETERS_FILE: 'infra/main.parameters.json'
+
+  # 기본 설정
+  LOCATION: 'koreacentral'
+  RESOURCE_GROUP: 'rg-aks-network-demo'
+
+jobs:
+  # ============================================
+  # Job 1: Bicep 유효성 검사
+  # ============================================
+  validate:
+    name: Validate Bicep Templates
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Setup Bicep
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          az bicep install
+          az bicep version
+
+    - name: Lint Bicep Templates
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          echo "### Bicep Lint Results" >> $GITHUB_STEP_SUMMARY
+
+          # 모든 bicep 파일 린트
+          find infra -name "*.bicep" | while read file; do
+            echo "Linting: $file"
+            az bicep lint --file "$file" 2>&1 || true
+          done
+
+          echo "✅ Lint completed" >> $GITHUB_STEP_SUMMARY
+
+    - name: Build Bicep Templates
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          echo "Building main.bicep..."
+          az bicep build --file ${{ env.BICEP_FILE }} --outfile infra/main.json
+          echo "✅ Build successful"
+
+    - name: Validate Deployment
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          LOCATION="${{ github.event.inputs.location || env.LOCATION }}"
+
+          echo "Validating deployment at subscription scope..."
+          az deployment sub validate \
+            --location "$LOCATION" \
+            --template-file ${{ env.BICEP_FILE }} \
+            --parameters ${{ env.PARAMETERS_FILE }} \
+            --parameters acrName='acraksdemo${{ github.run_id }}' \
+            --parameters jumpboxAdminPassword='${{ secrets.JUMPBOX_PASSWORD }}' \
+            --parameters sshPublicKey='${{ secrets.SSH_PUBLIC_KEY }}'
+
+          echo "### ✅ Validation Passed" >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: bicep-artifacts
+        path: |
+          infra/main.json
+          infra/main.bicep
+          infra/main.parameters.json
+        retention-days: 7
+
+  # ============================================
+  # Job 2: What-If 분석 (변경사항 미리보기)
+  # ============================================
+  what-if:
+    name: What-If Analysis
+    needs: validate
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event.inputs.action == 'what-if'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: What-If Analysis
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          LOCATION="${{ github.event.inputs.location || env.LOCATION }}"
+
+          echo "## What-If Analysis Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          az deployment sub what-if \
+            --location "$LOCATION" \
+            --template-file ${{ env.BICEP_FILE }} \
+            --parameters ${{ env.PARAMETERS_FILE }} \
+            --parameters acrName='acraksdemo${{ github.run_id }}' \
+            --parameters jumpboxAdminPassword='${{ secrets.JUMPBOX_PASSWORD }}' \
+            --parameters sshPublicKey='${{ secrets.SSH_PUBLIC_KEY }}' \
+            --result-format FullResourcePayloads \
+            2>&1 | tee what-if-output.txt
+
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat what-if-output.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Comment on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const output = fs.readFileSync('what-if-output.txt', 'utf8');
+
+          const body = `## 🔍 Bicep What-If Analysis
+
+          \`\`\`
+          ${output.substring(0, 60000)}
+          \`\`\`
+
+          > 이 분석은 실제 배포 시 발생할 변경사항을 보여줍니다.
+          `;
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: body
+          });
+
+  # ============================================
+  # Job 3: 인프라 배포
+  # ============================================
+  deploy:
+    name: Deploy Infrastructure
+    needs: validate
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'deploy')
+
+    environment:
+      name: ${{ github.event.inputs.environment || 'demo' }}
+
+    outputs:
+      aks_cluster_name: ${{ steps.deploy.outputs.aksClusterName }}
+      aks_fqdn: ${{ steps.deploy.outputs.aksClusterFqdn }}
+      acr_login_server: ${{ steps.deploy.outputs.acrLoginServer }}
+      jumpbox_ip: ${{ steps.deploy.outputs.jumpboxPublicIp }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Deploy Bicep Template
+      id: deploy
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          LOCATION="${{ github.event.inputs.location || env.LOCATION }}"
+          DEPLOYMENT_NAME="aks-infra-$(date +%Y%m%d-%H%M%S)"
+
+          echo "Starting deployment: $DEPLOYMENT_NAME"
+          echo "Location: $LOCATION"
+
+          # 배포 실행
+          OUTPUTS=$(az deployment sub create \
+            --name "$DEPLOYMENT_NAME" \
+            --location "$LOCATION" \
+            --template-file ${{ env.BICEP_FILE }} \
+            --parameters ${{ env.PARAMETERS_FILE }} \
+            --parameters acrName='${{ secrets.ACR_NAME || format('acraksdemo{0}', github.run_id) }}' \
+            --parameters jumpboxAdminPassword='${{ secrets.JUMPBOX_PASSWORD }}' \
+            --parameters sshPublicKey='${{ secrets.SSH_PUBLIC_KEY }}' \
+            --query 'properties.outputs' \
+            --output json)
+
+          # 출력값 추출
+          echo "aksClusterName=$(echo $OUTPUTS | jq -r '.aksClusterName.value')" >> $GITHUB_OUTPUT
+          echo "aksClusterFqdn=$(echo $OUTPUTS | jq -r '.aksClusterFqdn.value')" >> $GITHUB_OUTPUT
+          echo "acrLoginServer=$(echo $OUTPUTS | jq -r '.acrLoginServer.value')" >> $GITHUB_OUTPUT
+          echo "jumpboxPublicIp=$(echo $OUTPUTS | jq -r '.jumpboxPublicIp.value')" >> $GITHUB_OUTPUT
+          echo "resourceGroupName=$(echo $OUTPUTS | jq -r '.resourceGroupName.value')" >> $GITHUB_OUTPUT
+
+    - name: Deployment Summary
+      run: |
+        echo "## 🚀 Infrastructure Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| AKS Cluster | \`${{ steps.deploy.outputs.aksClusterName }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| AKS FQDN | \`${{ steps.deploy.outputs.aksClusterFqdn }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| ACR Login Server | \`${{ steps.deploy.outputs.acrLoginServer }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "| Jumpbox IP | \`${{ steps.deploy.outputs.jumpboxPublicIp }}\` |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. Get AKS credentials: \`az aks get-credentials --resource-group ${{ env.RESOURCE_GROUP }} --name ${{ steps.deploy.outputs.aksClusterName }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "2. Connect to Jumpbox: \`ssh <username>@${{ steps.deploy.outputs.jumpboxPublicIp }}\`" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================
+  # Job 4: 배포 검증
+  # ============================================
+  verify:
+    name: Verify Deployment
+    needs: deploy
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Verify AKS Cluster
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          echo "Verifying AKS cluster..."
+
+          # AKS 상태 확인
+          AKS_STATUS=$(az aks show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ needs.deploy.outputs.aks_cluster_name }} \
+            --query 'provisioningState' \
+            --output tsv)
+
+          if [ "$AKS_STATUS" == "Succeeded" ]; then
+            echo "✅ AKS cluster is healthy"
+          else
+            echo "❌ AKS cluster status: $AKS_STATUS"
+            exit 1
+          fi
+
+          # 노드 상태 확인
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ needs.deploy.outputs.aks_cluster_name }} \
+            --overwrite-existing
+
+          echo "Checking node status..."
+          kubectl get nodes -o wide
+
+          echo "### ✅ Deployment Verification Passed" >> $GITHUB_STEP_SUMMARY
+
+    - name: Verify Network Configuration
+      uses: azure/CLI@v2
+      with:
+        azcliversion: latest
+        inlineScript: |
+          echo "Verifying network configuration..."
+
+          # VNet Peering 상태 확인
+          PEERING_STATE=$(az network vnet peering show \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --vnet-name vnet-hub \
+            --name peer-hub-to-spoke-aks \
+            --query 'peeringState' \
+            --output tsv)
+
+          if [ "$PEERING_STATE" == "Connected" ]; then
+            echo "✅ VNet peering is connected"
+          else
+            echo "⚠️ VNet peering state: $PEERING_STATE"
+          fi
+
+  # ============================================
+  # Job 5: 정리 (실패 시 - 선택적)
+  # ============================================
+  cleanup-on-failure:
+    name: Cleanup on Failure
+    needs: [validate, deploy]
+    runs-on: ubuntu-latest
+    if: failure() && github.event.inputs.action == 'deploy'
+
+    steps:
+    - name: Azure Login
+      uses: azure/login@v2
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ env.AZURE_TENANT_ID }}
+        subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Notify Failure
+      run: |
+        echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "배포가 실패했습니다. 로그를 확인하고 필요한 경우 수동으로 리소스를 정리하세요." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "리소스 그룹 삭제 명령어:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "az group delete --name ${{ env.RESOURCE_GROUP }} --yes --no-wait" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
