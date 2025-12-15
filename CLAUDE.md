@@ -500,9 +500,150 @@ Spoke VNet (10.1.0.0/16)
 
 ---
 
+---
+
+## Phase 11: AKS 모니터링 시스템 구성 (2025-12-15)
+
+### 11.1 모니터링 시스템 전체 구성
+
+**요청:** AKS 클러스터에 대한 종합 모니터링 시스템 구성
+
+**구성 목표:**
+1. Log Analytics + Container Insights - 로그 및 메트릭 수집
+2. Azure Monitor managed service for Prometheus - Prometheus 메트릭
+3. Azure Managed Grafana - 시각화 대시보드
+4. Alert Rules - 임계치 기반 알림
+
+### 11.2 수행 명령어
+
+```bash
+# 1. Log Analytics 워크스페이스 생성
+az monitor log-analytics workspace create \
+    --resource-group rg-aks-network-demo \
+    --workspace-name law-aks-demo-monitoring \
+    --location koreacentral
+
+# 2. Container Insights 활성화
+az aks enable-addons -a monitoring \
+    --name aks-demo-cluster \
+    --resource-group rg-aks-network-demo \
+    --workspace-resource-id "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourceGroups/rg-aks-network-demo/providers/Microsoft.OperationalInsights/workspaces/law-aks-demo-monitoring"
+
+# 3. Azure Monitor 워크스페이스 생성 (Prometheus용)
+az resource create \
+    --resource-group rg-aks-network-demo \
+    --namespace microsoft.monitor \
+    --resource-type accounts \
+    --name amw-aks-demo-prometheus \
+    --location koreacentral \
+    --properties '{}'
+
+# 4. Azure Managed Grafana 인스턴스 생성
+az grafana create \
+    --name grafana-aks-demo \
+    --resource-group rg-aks-network-demo \
+    --location koreacentral
+
+# 5. AKS 클러스터에 Prometheus 메트릭 수집 연결
+az aks update \
+    --name aks-demo-cluster \
+    --resource-group rg-aks-network-demo \
+    --enable-azure-monitor-metrics \
+    --azure-monitor-workspace-resource-id "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourcegroups/rg-aks-network-demo/providers/microsoft.monitor/accounts/amw-aks-demo-prometheus" \
+    --grafana-resource-id "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourceGroups/rg-aks-network-demo/providers/Microsoft.Dashboard/grafana/grafana-aks-demo"
+
+# 6. 알림 액션 그룹 생성
+az monitor action-group create \
+    --name ag-aks-demo-alerts \
+    --resource-group rg-aks-network-demo \
+    --short-name aks-alert \
+    --action email admin-email conor.han@spintech.kr
+
+# 7. CPU 사용률 알림 규칙 생성
+az monitor metrics alert create \
+    --name "alert-aks-high-cpu" \
+    --resource-group rg-aks-network-demo \
+    --scopes "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourcegroups/rg-aks-network-demo/providers/Microsoft.ContainerService/managedClusters/aks-demo-cluster" \
+    --condition "avg node_cpu_usage_percentage > 80" \
+    --description "AKS 노드 CPU 사용률 80% 초과" \
+    --severity 2 \
+    --evaluation-frequency 5m \
+    --window-size 15m
+
+# 8. 메모리 사용률 알림 규칙 생성
+az monitor metrics alert create \
+    --name "alert-aks-high-memory" \
+    --resource-group rg-aks-network-demo \
+    --scopes "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourcegroups/rg-aks-network-demo/providers/Microsoft.ContainerService/managedClusters/aks-demo-cluster" \
+    --condition "avg node_memory_working_set_percentage > 80" \
+    --description "AKS 노드 메모리 사용률 80% 초과" \
+    --severity 2
+
+# 9. 노드 상태 알림 규칙 생성
+az monitor metrics alert create \
+    --name "alert-aks-node-not-ready" \
+    --resource-group rg-aks-network-demo \
+    --scopes "/subscriptions/4c1714bf-8c37-4d10-99a5-5aaf03a4092f/resourcegroups/rg-aks-network-demo/providers/Microsoft.ContainerService/managedClusters/aks-demo-cluster" \
+    --condition "total cluster_autoscaler_cluster_safe_to_autoscale < 1" \
+    --description "AKS 클러스터 노드 문제 감지" \
+    --severity 1
+```
+
+### 11.3 생성된 모니터링 리소스
+
+| 리소스 타입 | 리소스명 | 용도 |
+|------------|---------|------|
+| Log Analytics Workspace | `law-aks-demo-monitoring` | 로그 및 메트릭 저장 |
+| Azure Monitor Workspace | `amw-aks-demo-prometheus` | Prometheus 메트릭 저장 |
+| Azure Managed Grafana | `grafana-aks-demo` | 시각화 대시보드 |
+| Data Collection Rule | `MSCI-koreacentral-aks-demo-cluster` | Container Insights 수집 규칙 |
+| Data Collection Rule | `MSProm-koreacentral-aks-demo-cluster` | Prometheus 수집 규칙 |
+| Prometheus Rule Groups | `NodeRecordingRulesRuleGroup-*` | Prometheus 레코딩 규칙 |
+| Action Group | `ag-aks-demo-alerts` | 알림 수신 그룹 |
+| Metric Alert | `alert-aks-high-cpu` | CPU 알림 |
+| Metric Alert | `alert-aks-high-memory` | 메모리 알림 |
+| Metric Alert | `alert-aks-node-not-ready` | 노드 상태 알림 |
+
+### 11.4 접속 URL
+
+| 서비스 | URL |
+|--------|-----|
+| Grafana 대시보드 | https://grafana-aks-demo-hpd7a0f4cyaqg9gg.sel.grafana.azure.com |
+| Prometheus Query Endpoint | https://amw-aks-demo-prometheus-ehbtbvdgf4dyb6gs.koreacentral.prometheus.monitor.azure.com |
+
+### 11.5 알림 규칙 구성
+
+| 알림명 | 조건 | 심각도 | 평가 주기 | 윈도우 크기 |
+|--------|------|--------|----------|------------|
+| alert-aks-high-cpu | avg node_cpu_usage_percentage > 80 | 2 (Warning) | 5분 | 15분 |
+| alert-aks-high-memory | avg node_memory_working_set_percentage > 80 | 2 (Warning) | 5분 | 15분 |
+| alert-aks-node-not-ready | cluster_autoscaler_cluster_safe_to_autoscale < 1 | 1 (Error) | 1분 | 5분 |
+
+### 11.6 모니터링 검증
+
+```bash
+# AKS 모니터링 상태 확인
+az aks show --name aks-demo-cluster --resource-group rg-aks-network-demo \
+  --query "{Name:name, ContainerInsights:addonProfiles.omsagent.enabled, PrometheusMetrics:azureMonitorProfile.metrics}"
+
+# 결과:
+# {
+#   "ContainerInsights": true,
+#   "Name": "aks-demo-cluster",
+#   "PrometheusMetrics": {
+#     "enabled": true
+#   }
+# }
+```
+
+---
+
 ## 참고 문서
 
 - [Azure AKS 네트워킹 개념](https://docs.microsoft.com/azure/aks/concepts-network)
 - [Hub-Spoke 토폴로지](https://docs.microsoft.com/azure/architecture/reference-architectures/hybrid-networking/hub-spoke)
 - [GitHub Actions for Azure](https://docs.microsoft.com/azure/developer/github/github-actions)
 - [AKS 노드 접속 방법](https://docs.microsoft.com/azure/aks/node-access)
+- [Azure Monitor Container Insights](https://docs.microsoft.com/azure/azure-monitor/containers/container-insights-overview)
+- [Azure Managed Grafana](https://docs.microsoft.com/azure/managed-grafana/overview)
+- [Azure Monitor managed service for Prometheus](https://docs.microsoft.com/azure/azure-monitor/essentials/prometheus-metrics-overview)
