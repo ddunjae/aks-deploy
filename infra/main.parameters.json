@@ -48,6 +48,12 @@
     },
     "sshPublicKey": {
       "value": "<your-ssh-public-key>"
+    },
+    "alertEmailAddress": {
+      "value": "conor.han@spintech.kr"
+    },
+    "enableMonitoring": {
+      "value": true
     }
   }
 }

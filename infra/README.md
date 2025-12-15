@@ -47,6 +47,11 @@ This directory contains Bicep templates for deploying the AKS demo environment w
 | AKS Cluster | Managed Kubernetes cluster |
 | ACR | Container registry for images |
 | Jumpbox VM | Management VM in Hub network |
+| Log Analytics Workspace | Centralized logging for AKS |
+| Azure Monitor Workspace | Prometheus metrics storage |
+| Grafana | Visualization dashboards |
+| Action Group | Alert notification targets |
+| Metric Alerts | CPU, Memory, Node health alerts |
 
 ## Prerequisites
 
@@ -110,6 +115,12 @@ infra/
     │   └── jumpbox-vm.bicep   # Jumpbox VM module
     ├── identity/
     │   └── role-assignment.bicep  # Role assignment module
+    ├── monitoring/
+    │   ├── log-analytics.bicep      # Log Analytics Workspace module
+    │   ├── azure-monitor-workspace.bicep  # Azure Monitor (Prometheus) module
+    │   ├── grafana.bicep            # Azure Managed Grafana module
+    │   ├── action-group.bicep       # Alert Action Group module
+    │   └── metric-alerts.bicep      # AKS Metric Alerts module
     └── network/
         ├── nsg.bicep          # Network Security Group module
         ├── route-table.bicep  # Route Table module

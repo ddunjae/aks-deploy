@@ -49,6 +49,12 @@ param jumpboxAdminPassword string
 @description('SSH public key for AKS nodes')
 param sshPublicKey string
 
+@description('Email address for alert notifications')
+param alertEmailAddress string = 'conor.han@spintech.kr'
+
+@description('Enable monitoring resources (Log Analytics, Grafana, Alerts)')
+param enableMonitoring bool = true
+
 // ============================================================================
 // Variables
 // ============================================================================
@@ -401,6 +407,85 @@ module acrPullRoleAssignment 'modules/identity/role-assignment.bicep' = {
 }
 
 // ============================================================================
+// Monitoring Resources
+// ============================================================================
+
+// Log Analytics Workspace
+module logAnalytics 'modules/monitoring/log-analytics.bicep' = if (enableMonitoring) {
+  name: 'log-analytics-deployment'
+  scope: rg
+  params: {
+    workspaceName: 'law-aks-demo-monitoring'
+    location: location
+    tags: union(tags, { Purpose: 'AKS Monitoring' })
+    sku: 'PerGB2018'
+    retentionInDays: 30
+  }
+}
+
+// Azure Monitor Workspace (Prometheus)
+module azureMonitorWorkspace 'modules/monitoring/azure-monitor-workspace.bicep' = if (enableMonitoring) {
+  name: 'azure-monitor-workspace-deployment'
+  scope: rg
+  params: {
+    workspaceName: 'amw-aks-demo-prometheus'
+    location: location
+    tags: union(tags, { Purpose: 'AKS Prometheus Metrics' })
+  }
+}
+
+// Azure Managed Grafana
+module grafana 'modules/monitoring/grafana.bicep' = if (enableMonitoring) {
+  name: 'grafana-deployment'
+  scope: rg
+  dependsOn: [azureMonitorWorkspace]
+  params: {
+    grafanaName: 'grafana-aks-demo'
+    location: location
+    tags: union(tags, { Purpose: 'AKS Monitoring Dashboard' })
+    sku: 'Standard'
+    azureMonitorWorkspaceId: enableMonitoring ? azureMonitorWorkspace.outputs.workspaceId : ''
+    zoneRedundancy: false
+    apiKeyEnabled: false
+    deterministicOutboundIpEnabled: false
+  }
+}
+
+// Action Group for Alerts
+module actionGroup 'modules/monitoring/action-group.bicep' = if (enableMonitoring) {
+  name: 'action-group-deployment'
+  scope: rg
+  params: {
+    actionGroupName: 'ag-aks-demo-alerts'
+    shortName: 'aksalerts'
+    tags: tags
+    emailReceivers: [
+      {
+        name: 'Admin'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+// Metric Alerts
+module metricAlerts 'modules/monitoring/metric-alerts.bicep' = if (enableMonitoring) {
+  name: 'metric-alerts-deployment'
+  scope: rg
+  dependsOn: [aksCluster, actionGroup]
+  params: {
+    alertNamePrefix: 'alert-aks'
+    aksClusterId: aksCluster.outputs.aksClusterId
+    actionGroupIds: [
+      actionGroup.outputs.actionGroupId
+    ]
+    enabled: true
+    tags: tags
+  }
+}
+
+// ============================================================================
 // Outputs
 // ============================================================================
 
@@ -411,3 +496,9 @@ output acrLoginServer string = acr.outputs.acrLoginServer
 output jumpboxPublicIp string = jumpboxVm.outputs.vmPublicIp
 output hubVnetId string = vnetHub.outputs.vnetId
 output spokeVnetId string = vnetSpoke.outputs.vnetId
+
+// Monitoring Outputs
+output logAnalyticsWorkspaceId string = enableMonitoring ? logAnalytics.outputs.workspaceId : ''
+output azureMonitorWorkspaceId string = enableMonitoring ? azureMonitorWorkspace.outputs.workspaceId : ''
+output grafanaEndpoint string = enableMonitoring ? grafana.outputs.endpoint : ''
+output actionGroupId string = enableMonitoring ? actionGroup.outputs.actionGroupId : ''
