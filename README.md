@@ -408,7 +408,16 @@ kubectl apply -f k8s/
 
 ## 6. CI/CD 파이프라인
 
-### 6.1 파이프라인 흐름
+### 6.1 전체 CI/CD 구조
+
+이 프로젝트는 두 가지 CI/CD 파이프라인을 제공합니다:
+
+| 파이프라인 | 파일 | 용도 | 트리거 |
+|-----------|------|------|--------|
+| **애플리케이션 배포** | `ci-cd.yaml` | Docker 이미지 빌드 및 AKS 배포 | `src/`, `k8s/` 변경 시 |
+| **인프라 배포 (Bicep)** | `deploy-infra.yaml` | Azure 인프라 프로비저닝 | `infra/` 변경 시 |
+
+### 6.2 애플리케이션 배포 흐름
 
 ```
 ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
@@ -423,7 +432,71 @@ kubectl apply -f k8s/
                                                          └─────────────┘
 ```
 
-### 6.2 GitHub Secrets 설정
+### 6.3 인프라 배포 흐름 (Bicep)
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                          Infrastructure Deployment (Bicep)                       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+
+                    ┌──────────────────────────────────────┐
+                    │         infra/ 폴더 변경              │
+                    │    (Push to main 또는 PR 생성)        │
+                    └─────────────────┬────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│  Stage 1: Validate                                                               │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐    ┌─────────────┐       │
+│  │  Bicep Lint │───▶│   Build     │───▶│  Validate   │───▶│  Artifacts  │       │
+│  │             │    │  (→ ARM)    │    │  Template   │    │   Upload    │       │
+│  └─────────────┘    └─────────────┘    └─────────────┘    └─────────────┘       │
+└─────────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                    ┌─────────────────┴─────────────────┐
+              [PR인 경우]                         [main Push]
+                    │                                   │
+                    ▼                                   ▼
+┌───────────────────────────────────┐   ┌───────────────────────────────────────┐
+│  Stage 2: What-If Analysis        │   │  Stage 3: Deploy                       │
+│  (변경사항 미리보기)               │   │  (Bicep → Azure 배포)                  │
+└───────────────────────────────────┘   └───────────────────────────────────────┘
+                                                               │
+                                                               ▼
+                                        ┌───────────────────────────────────────┐
+                                        │  Stage 4: Verify (AKS/Network 검증)   │
+                                        └───────────────────────────────────────┘
+```
+
+### 6.4 Bicep 배포 리소스
+
+`infra/` 폴더의 Bicep 템플릿으로 배포되는 리소스:
+
+| 리소스 | 설명 |
+|--------|------|
+| Resource Group | `rg-aks-network-demo` |
+| Hub VNet | `vnet-hub` (10.0.0.0/16) |
+| Spoke VNet | `vnet-spoke-aks` (10.1.0.0/16) |
+| VNet Peering | Hub ↔ Spoke 양방향 |
+| NSGs | AKS, AppGW, Jumpbox용 |
+| Route Table | AKS 서브넷용 |
+| AKS Cluster | Azure CNI, Auto-scaling |
+| ACR | Basic SKU |
+| Jumpbox VM | 관리용 Ubuntu VM |
+
+### 6.5 수동 인프라 배포
+
+GitHub Actions → **Deploy Infrastructure (Bicep)** → **Run workflow**
+
+| 옵션 | 설명 |
+|------|------|
+| `environment` | `demo`, `dev`, `prod` 중 선택 |
+| `action` | `validate` (검증만), `what-if` (미리보기), `deploy` (배포) |
+| `location` | Azure 리전 (기본: `koreacentral`) |
+
+### 6.6 GitHub Secrets 설정
+
+#### 애플리케이션 배포용
 
 | Secret Name | 값 |
 |-------------|-----|
@@ -431,7 +504,17 @@ kubectl apply -f k8s/
 | `ACR_USERNAME` | `acraksdemo66749` |
 | `ACR_PASSWORD` | ACR admin 비밀번호 |
 
-### 6.3 Azure 서비스 주체 생성
+#### 인프라 배포용 (Bicep)
+
+| Secret Name | 설명 |
+|-------------|------|
+| `AZURE_CLIENT_ID` | Azure AD App Registration Client ID |
+| `JUMPBOX_PASSWORD` | Jumpbox VM 관리자 비밀번호 |
+| `SSH_PUBLIC_KEY` | AKS 노드용 SSH 공개키 |
+
+> 자세한 설정 방법은 [infra/CICD-SETUP.md](./infra/CICD-SETUP.md) 참조
+
+### 6.7 Azure 서비스 주체 생성
 
 ```bash
 az ad sp create-for-rbac \
@@ -441,7 +524,7 @@ az ad sp create-for-rbac \
   --sdk-auth
 ```
 
-### 6.4 ACR 비밀번호 확인
+### 6.8 ACR 비밀번호 확인
 
 ```bash
 az acr credential show --name acraksdemo66749 --query "passwords[0].value" -o tsv
